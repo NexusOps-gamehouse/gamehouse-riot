@@ -1,0 +1,7 @@
+apply plugin: 'org.springframework.boot'
+
+// riot 은 테이블을 소유하지 않는다. JPA 도, DB 드라이버도 필요 없다.
+dependencies {
+    implementation project(':common')
+    implementation 'org.springframework.boot:spring-boot-starter-webflux'
+}

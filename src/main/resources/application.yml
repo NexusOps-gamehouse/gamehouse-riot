@@ -1,0 +1,83 @@
+server:
+  port: ${SERVER_PORT:8084}
+
+spring:
+  application:
+    name: gamehouse-riot
+  config:
+    import:
+      - optional:classpath:application-secret.yml
+      - optional:file:./application-secret.yml
+      - optional:file:../application-secret.yml
+
+jwt:
+  secret: ${JWT_SECRET}
+  expiration-ms: ${JWT_EXPIRATION_MS:86400000}
+
+app:
+  cors-allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:5173}
+
+# 서비스 간 호출 주소.
+# k8s 에서는 서비스 이름(http://user:8081)으로 들어오고, 로컬에서는 아래 기본값을 쓴다.
+riot:
+  api:
+    key: ${RIOT_API_KEY:dummy_key}
+    regional-url: https://asia.api.riotgames.com
+    platform-url: https://kr.api.riotgames.com
+
+# riot 은 이벤트를 발행하지도 구독하지도 않는다. 소유 테이블이 없어
+# 다른 서비스에 알릴 상태 변화가 없다. 브로커에 연결할 이유가 없으므로 끈다.
+gamehouse:
+  events:
+    enabled: false
+
+services:
+  user:
+    base-url: ${USER_SERVICE_URL:http://localhost:8081}
+  post:
+    base-url: ${POST_SERVICE_URL:http://localhost:8082}
+  chat:
+    base-url: ${CHAT_SERVICE_URL:http://localhost:8083}
+  riot:
+    base-url: ${RIOT_SERVICE_URL:http://localhost:8084}
+
+# ---------------------------------------------------------------------------
+# Observability (Actuator + Micrometer)
+#
+# 관리 포트를 앱 포트와 분리한다. Ingress 에 이 포트 규칙이 없으므로
+# 클러스터 안의 Prometheus 만 gamehouse-riot:8184/actuator/prometheus 로 수집할 수 있다.
+#
+# exposure.include 는 화이트리스트다. /actuator/env, /actuator/heapdump 같은
+# 민감한 엔드포인트가 열리지 않도록 필요한 것만 나열한다.
+# ---------------------------------------------------------------------------
+management:
+  server:
+    port: 8184
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+  metrics:
+    tags:
+      application: gamehouse-riot
+    distribution:
+      # p95 / p99 를 구하려면 _bucket 메트릭이 필요하다.
+      # Spring Boot 기본값은 _count / _sum / _max 만 내보내므로
+      # 이 설정이 없으면 histogram_quantile(...) 이 항상 빈 결과가 된다.
+      percentiles-histogram:
+        http.server.requests: true    # 우리가 받는 요청
+        http.client.requests: true    # 우리가 보내는 요청 (서비스 간 호출 포함)
+      slo:
+        http.server.requests: 50ms, 100ms, 200ms, 500ms, 1s, 2s, 5s
+        http.client.requests: 100ms, 300ms, 500ms, 1s, 2s, 5s
+      minimum-expected-value:
+        http.server.requests: 10ms
+      maximum-expected-value:
+        http.server.requests: 10s
+  observations:
+    key-values:
+      env: ${ENV_NAME:local}
