@@ -12,8 +12,20 @@ WORKDIR /app
 # 의존성 정의 먼저 복사 → 소스만 바뀔 때 빌드 캐시 재사용
 COPY gradlew settings.gradle build.gradle ./
 COPY gradle ./gradle
+# settings.gradle 이 모듈 5개를 전부 선언하므로, 빌드 대상이 하나여도
+# Gradle 은 설정 단계에서 5개 프로젝트를 모두 읽는다.
+# 자기 것만 복사하면 나머지 디렉터리가 없어서 이렇게 죽는다.
+#   Configuring project ':user' without an existing directory is not allowed
+# (Gradle 9 부터 경고가 아니라 에러다)
+#
+# build.gradle 은 몇 줄짜리라 5개를 다 복사해도 레이어가 거의 안 커지고,
+# 거의 바뀌지 않으므로 캐시도 그대로 유지된다.
+# src 는 아래에서 필요한 것만 복사한다 — 그게 캐시를 좌우하는 부분이다.
 COPY common/build.gradle ./common/
-COPY riot/build.gradle ./riot/
+COPY user/build.gradle   ./user/
+COPY post/build.gradle   ./post/
+COPY chat/build.gradle   ./chat/
+COPY riot/build.gradle   ./riot/
 RUN chmod +x gradlew
 
 # 의존성만 먼저 받아 별도 레이어로 캐시. src와 분리 → 소스만 바뀌면 이 레이어 재사용.
