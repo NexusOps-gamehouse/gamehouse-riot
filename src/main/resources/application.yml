@@ -40,6 +40,8 @@ services:
     base-url: ${CHAT_SERVICE_URL:http://localhost:8083}
   riot:
     base-url: ${RIOT_SERVICE_URL:http://localhost:8084}
+  match:
+    base-url: ${MATCH_SERVICE_URL:http://localhost:8085}
 
 # ---------------------------------------------------------------------------
 # Observability (Actuator + Micrometer)
