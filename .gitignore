@@ -1,0 +1,28 @@
+.gradle/
+build/
+*/build/
+bin/
+*/bin/
+out/
+
+# 로컬 시크릿 — 컨테이너는 환경변수로 주입받는다
+application-secret.yml
+*/src/main/resources/application-secret.yml
+
+uploads/
+*/uploads/
+
+# DB 백업 (실데이터 포함 — 커밋 금지)
+backup_*.sql
+
+# 검증용 임시 아카이브
+_verify-tmp.tgz
+.DS_Store
+*.zip
+
+# 정리 대기 (로컬 전용)
+_to_delete/
+
+# 개인 자격증명 — ~/.gradle/gradle.properties 에 둘 것
+gradle.properties
+gradle.properties.ci

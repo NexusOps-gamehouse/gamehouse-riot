@@ -1,7 +1,79 @@
-apply plugin: 'org.springframework.boot'
+/*
+ * gamehouse-riot — 라이엇 API 연동 서비스.
+ *
+ * 모노레포에서는 backend 루트 build.gradle 이 plugin·toolchain·컴파일 옵션을
+ * subprojects 로 일괄 적용하고, common 은 project(':common') 으로 참조했다.
+ * 레포가 갈라지면서 둘 다 사라졌으므로 여기서 직접 선언한다.
+ */
+plugins {
+    id 'java'
+    id 'org.springframework.boot' version '3.3.5'
+    id 'io.spring.dependency-management' version '1.1.6'
+}
+
+group = 'gg.duo'
+version = '0.0.1-SNAPSHOT'
+
+java { toolchain { languageVersion = JavaLanguageVersion.of(17) } }
+
+repositories {
+    mavenCentral()
+
+    /*
+     * common 이 사는 곳.
+     *
+     * ⚠️ GitHub Packages 는 public 패키지도 읽기에 토큰이 필요하다.
+     *    Maven Central 처럼 익명으로 못 받는다. 팀원 전원이
+     *    ~/.gradle/gradle.properties 에 아래 두 줄을 넣어야 빌드가 된다.
+     *      gpr.user=<GitHub 아이디>
+     *      gpr.key=<classic PAT · read:packages>
+     *
+     *    CI 에서는 환경변수 GITHUB_ACTOR / GITHUB_TOKEN 으로 대체된다.
+     *    단, 기본 GITHUB_TOKEN 은 자기 레포 패키지만 읽는다 —
+     *    조직 secret 으로 GPR_TOKEN(read:packages PAT)을 두고 쓴다.
+     */
+    maven {
+        name = 'GitHubPackages'
+        url = 'https://maven.pkg.github.com/NexusOps-gamehouse/gamehouse-common'
+        credentials {
+            username = findProperty('gpr.user') ?: System.getenv('GITHUB_ACTOR')
+            password = findProperty('gpr.key')  ?: System.getenv('GITHUB_TOKEN')
+        }
+    }
+}
+
+/*
+ * -parameters 를 켠다.
+ *
+ * Spring Boot 플러그인이 자동으로 붙여주지만, 모노레포 루트가 명시적으로
+ * 걸어두던 설정이라 의도를 남겨둔다. 이벤트 record 의 JSON 역직렬화가
+ * 생성자 파라미터 이름에 의존한다.
+ */
+tasks.withType(JavaCompile).configureEach {
+    options.compilerArgs << '-parameters'
+    options.encoding = 'UTF-8'
+}
 
 // riot 은 테이블을 소유하지 않는다. JPA 도, DB 드라이버도 필요 없다.
 dependencies {
-    implementation project(':common')
+    /*
+     * 모노레포의 project(':common') 이 여기로 바뀐다.
+     *
+     * common 이 Spring Boot BOM 을 api 로 노출하므로, 아래 starter 들에
+     * 버전을 적지 않아도 된다.
+     *
+     * ⚠️ 고정 버전이다. SNAPSHOT 을 쓰면 발행자와 소비자가 서로 다른 시점을
+     *    물고도 빌드가 성공하고, 이벤트 필드가 어긋난 채 배포된다.
+     *    common 이 올라가면 여기 버전도 함께 올린다.
+     */
+    implementation 'gg.duo:common:0.1.0'
     implementation 'org.springframework.boot:spring-boot-starter-webflux'
+
+    compileOnly 'org.projectlombok:lombok'
+    annotationProcessor 'org.projectlombok:lombok'
+    testCompileOnly 'org.projectlombok:lombok'
+    testAnnotationProcessor 'org.projectlombok:lombok'
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
 }
+
+tasks.named('test') { useJUnitPlatform() }
