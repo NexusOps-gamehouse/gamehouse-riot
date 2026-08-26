@@ -27,6 +27,7 @@ COPY post/build.gradle   ./post/
 COPY chat/build.gradle   ./chat/
 COPY riot/build.gradle   ./riot/
 COPY match/build.gradle  ./match/
+COPY crew/build.gradle  ./crew/
 RUN chmod +x gradlew
 
 # 의존성만 먼저 받아 별도 레이어로 캐시. src와 분리 → 소스만 바뀌면 이 레이어 재사용.
