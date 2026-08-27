@@ -56,13 +56,51 @@ jobs:
 
       # BuildKit secret 으로 넘길 자격증명 파일.
       #
-      # ⚠️ 기본 GITHUB_TOKEN 은 자기 레포의 패키지만 읽는다.
-      #    common 은 gamehouse-common 레포 소유라 조직 secret GPR_TOKEN
-      #    (read:packages PAT)이 필요하다. 없으면 401 로 실패한다.
+      # common 은 gamehouse-common 레포가 소유한 패키지라, 이 레포의 워크플로가
+      # 읽으려면 둘 중 하나가 필요하다.
+      #
+      #   A) 패키지 설정 → Manage Actions access 에 이 레포를 Read 로 추가
+      #      → 아래 GITHUB_TOKEN 으로 읽힌다 (PAT 불필요, 만료 없음)
+      #   B) 조직 secret GPR_TOKEN (classic PAT, read:packages)
+      #
+      # 둘 중 뭐가 있든 동작하도록 GPR_TOKEN 을 우선하고 없으면 GITHUB_TOKEN 으로
+      # 넘어간다. 둘 다 없으면 401 Unauthorized 로 죽는다.
       - name: Write GPR credentials
         run: |
           printf 'gpr.user=%s\ngpr.key=%s\n' \
-            "${{ github.actor }}" "${{ secrets.GPR_TOKEN }}" > gradle.properties.ci
+            "${{ github.actor }}" \
+            "${{ secrets.GPR_TOKEN || secrets.GITHUB_TOKEN }}" > gradle.properties.ci
+
+      # 패키지를 실제로 읽을 수 있는지 먼저 확인한다.
+      #
+      # 이게 없으면 Docker 빌드를 5분 돌린 뒤에야 401 을 보게 된다.
+      # 여기서 죽으면 원인이 셋 중 하나다.
+      #   - GPR_TOKEN 이 비어 있음
+      #   - PAT 가 fine-grained (Packages 레지스트리는 classic 이라야 확실하다)
+      #   - read:packages 스코프 누락 또는 조직 PAT 정책 차단
+      - name: Check package access
+        run: |
+          if [ -z "${{ secrets.GPR_TOKEN }}" ]; then
+            echo "GPR_TOKEN : 비어 있음 → GITHUB_TOKEN 으로 시도"
+          else
+            echo "GPR_TOKEN : 설정됨"
+          fi
+
+          # -L 이 필요하다. GitHub Packages 는 인증이 통과하면 실제 파일이 있는
+          # objects.githubusercontent.com 으로 302 리다이렉트한다.
+          # 안 따라가면 302 에서 멈춰 실패로 오인한다.
+          code=$(curl -sL -o /dev/null -w '%{http_code}' \
+            -u "${{ github.actor }}:${{ secrets.GPR_TOKEN || secrets.GITHUB_TOKEN }}" \
+            https://maven.pkg.github.com/NexusOps-gamehouse/gamehouse-common/gg/duo/common/0.1.0/common-0.1.0.pom)
+
+          echo "common-0.1.0.pom => HTTP ${code}"
+          case "${code}" in
+            200) echo "패키지 읽기 OK" ;;
+            401) echo "::error::401 Unauthorized — 토큰이 유효하지 않다 (fine-grained PAT 이거나 read:packages 누락)"; exit 1 ;;
+            403) echo "::error::403 Forbidden — 조직 PAT 정책 또는 패키지 접근 권한 문제"; exit 1 ;;
+            404) echo "::error::404 Not Found — 패키지 좌표가 다르다 (artifactId/version 확인)"; exit 1 ;;
+            *)   echo "::error::예상치 못한 응답 ${code}"; exit 1 ;;
+          esac
 
       - name: Build image
         uses: docker/build-push-action@v6
@@ -138,7 +176,8 @@ jobs:
       - name: Write GPR credentials
         run: |
           printf 'gpr.user=%s\ngpr.key=%s\n' \
-            "${{ github.actor }}" "${{ secrets.GPR_TOKEN }}" > gradle.properties.ci
+            "${{ github.actor }}" \
+            "${{ secrets.GPR_TOKEN || secrets.GITHUB_TOKEN }}" > gradle.properties.ci
 
       - name: Build and push image
         uses: docker/build-push-action@v6
