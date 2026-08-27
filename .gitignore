@@ -26,3 +26,6 @@ _to_delete/
 # 개인 자격증명 — ~/.gradle/gradle.properties 에 둘 것
 gradle.properties
 gradle.properties.ci
+
+# IntelliJ 프로젝트 설정 — 사람마다 다르고 IDE 가 자동으로 고친다
+.idea/
