@@ -8,9 +8,9 @@ name: riot-ci-cd
 #           대신 common 을 GitHub Packages 에서 받아오므로 인증이 필요하다.
 on:
   pull_request:
-    branches: [develop]
+    branches: [develop, main]
   push:
-    branches: [develop]
+    branches: [develop, main]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -162,21 +162,41 @@ jobs:
   publish:
     name: publish
     needs: [verify, image-check]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 30
+
+    # OIDC 로 AWS 에 인증하려면 이 권한이 필요하다.
+    # id-token: write 가 없으면 GitHub 이 토큰을 발급하지 않아
+    # "Credentials could not be loaded" 로 죽는다. 가장 흔한 실수다.
+    permissions:
+      contents: read
+      id-token: write
+
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
 
-      - name: Configure AWS credentials
+      # [Docker Hub 때와 달라진 것]
+      #   before  액세스 키를 GitHub secret 에 저장 → 장기 자격증명이 남는다
+      #   after   GitHub 이 서명한 토큰을 AWS 가 확인하고 이 실행에만 유효한
+      #           임시 자격증명을 발급한다. 저장되는 비밀이 없다.
+      #
+      # 역할 ARN 은 조직 secret AWS_ROLE_ARN 에 둔다.
+      # 값 자체가 기밀은 아니지만 이 레포들이 public 이라 계정 ID 를 굳이
+      # 노출하지 않는다. 계정이나 역할 이름이 바뀌어도 secret 하나만 고치면
+      # 6개 레포가 함께 따라간다.
+      #
+      # 리전은 코드에 그대로 둔다 — 바뀔 일이 거의 없고, secret 이 늘수록
+      # "왜 실패했지" 의 후보가 늘어난다.
+      - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: ${{ secrets.AWS_REGION }}
+          aws-region: ap-northeast-2
 
       - name: Login to Amazon ECR
-        id: login-ecr
+        id: ecr
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Write GPR credentials
@@ -191,10 +211,22 @@ jobs:
           context: .
           push: true
           platforms: linux/amd64
+
+          # attestation 을 끈다. 켜두면 ECR 에 image index + 본체 + 증명서로 3개가
+          # 올라가 화면과 lifecycle 계산이 헷갈린다. amd64 단일이라 index 가 필요 없다.
+          provenance: false
+          sbom: false
+
           secret-files: |
             gpr=gradle.properties.ci
+
+          # 브랜치 이름 = "그 브랜치의 지금 최신", SHA = "정확히 이 커밋" → 롤백 기준.
+          #
+          # ⚠️ 브랜치를 하드코딩하지 말 것. :develop 으로 고정하면 main 에서 돈
+          #    이미지가 develop 태그를 덮어써 어느 브랜치 것인지 구분이 사라진다.
           tags: |
-            ${{ steps.login-ecr.outputs.registry }}/gamehouse-riot:develop
-            ${{ steps.login-ecr.outputs.registry }}/gamehouse-riot:${{ github.sha }}
+            ${{ steps.ecr.outputs.registry }}/gamehouse-riot:${{ github.ref_name }}
+            ${{ steps.ecr.outputs.registry }}/gamehouse-riot:${{ github.sha }}
+
           cache-from: type=gha,scope=riot
           cache-to: type=gha,mode=max,scope=riot
