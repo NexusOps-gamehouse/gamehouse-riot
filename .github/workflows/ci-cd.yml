@@ -229,9 +229,15 @@ jobs:
           #
           # ⚠️ 브랜치를 하드코딩하지 말 것. :develop 으로 고정하면 main 에서 돈
           #    이미지가 develop 태그를 덮어써 어느 브랜치 것인지 구분이 사라진다.
+          # SHA 태그에 dev- 접두사를 붙인다. 접두사가 없으면 콘솔 태그 목록에서
+          # 어느 SHA 가 develop 것이고 어느 게 main 승격분인지 구분되지 않는다.
+          # 접미사가 아니라 접두사인 이유: ECR 수명 주기 정책의 tagPrefixList 가
+          # 접두사 기준이라, 나중에 "dev- 태그는 N개만 유지" 같은 규칙을 걸기 쉽다.
+          # develop/main 브랜치 태그는 형식을 바꾸지 않는다 — k8s overlay 가
+          # newTag: develop 로 이 태그를 직접 참조한다.
           tags: |
             ${{ steps.ecr.outputs.registry }}/gamehouse-riot:${{ github.ref_name }}
-            ${{ steps.ecr.outputs.registry }}/gamehouse-riot:${{ github.sha }}
+            ${{ steps.ecr.outputs.registry }}/gamehouse-riot:dev-${{ github.sha }}
 
           cache-from: type=gha,scope=riot
           cache-to: type=gha,mode=max,scope=riot
@@ -290,9 +296,10 @@ jobs:
 
           if SRC=$(git rev-parse --verify -q "HEAD^2"); then
             echo "머지 커밋 감지 — 승격 대상 커밋: ${SRC}"
-            ID="imageTag=${SRC}"
+            ID="imageTag=dev-${SRC}"
           else
-            echo "::warning::머지 커밋이 아니다(스쿼시 또는 fast-forward). develop 태그로 폴백한다."
+            echo "::warning::dev-<sha> 태그를 특정하지 못했다 — 머지 커밋이 아니거나(스쿼시/fast-forward), 접두사 도입 이전에 빌드된 이미지다."
+            echo "::warning::develop 태그로 폴백한다."
             ID="imageTag=develop"
           fi
 
@@ -310,7 +317,7 @@ jobs:
           # 같은 매니페스트에 태그만 추가한다 — 이미지 본체는 새로 저장되지 않는다.
           # 이미 그 태그가 같은 이미지에 붙어 있으면 ImageAlreadyExistsException 이
           # 나는데, 원하는 상태와 같으므로 실패로 보지 않는다.
-          for TAG in main "$MAIN_SHA"; do
+          for TAG in main "main-$MAIN_SHA"; do
             if aws ecr put-image --repository-name "$REPO" \
                  --image-tag "$TAG" --image-manifest "$MANIFEST" >/dev/null 2>&1; then
               echo "  태그 완료: ${REPO}:${TAG}"
