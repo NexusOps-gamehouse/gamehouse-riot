@@ -49,6 +49,9 @@ jobs:
   # ---------------------------------------------------------------
   image-check:
     name: image-check
+    # main push 는 승격만 하므로 이미지를 다시 만들 필요가 없다.
+    # PR 검증과 develop push 에서만 돈다.
+    if: github.event_name == 'pull_request' || github.ref_name == 'develop'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -162,7 +165,9 @@ jobs:
   publish:
     name: publish
     needs: [verify, image-check]
-    if: github.event_name == 'push'
+    # develop push 에서만 빌드한다. main 은 아래 promote 잡이
+    # 이 결과물에 태그만 붙인다 — 같은 소스를 두 번 빌드하지 않는다.
+    if: github.event_name == 'push' && github.ref_name == 'develop'
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -224,9 +229,99 @@ jobs:
           #
           # ⚠️ 브랜치를 하드코딩하지 말 것. :develop 으로 고정하면 main 에서 돈
           #    이미지가 develop 태그를 덮어써 어느 브랜치 것인지 구분이 사라진다.
+          # SHA 태그에 dev- 접두사를 붙인다. 접두사가 없으면 콘솔 태그 목록에서
+          # 어느 SHA 가 develop 것이고 어느 게 main 승격분인지 구분되지 않는다.
+          # 접미사가 아니라 접두사인 이유: ECR 수명 주기 정책의 tagPrefixList 가
+          # 접두사 기준이라, 나중에 "dev- 태그는 N개만 유지" 같은 규칙을 걸기 쉽다.
+          # develop/main 브랜치 태그는 형식을 바꾸지 않는다 — k8s overlay 가
+          # newTag: develop 로 이 태그를 직접 참조한다.
           tags: |
             ${{ steps.ecr.outputs.registry }}/gamehouse-riot:${{ github.ref_name }}
-            ${{ steps.ecr.outputs.registry }}/gamehouse-riot:${{ github.sha }}
+            ${{ steps.ecr.outputs.registry }}/gamehouse-riot:dev-${{ github.sha }}
 
           cache-from: type=gha,scope=riot
           cache-to: type=gha,mode=max,scope=riot
+
+  # ---------------------------------------------------------------
+  # main 승격 — 다시 빌드하지 않는다.
+  #
+  # 같은 소스를 두 번 빌드하면 결과가 달라질 수 있다. jar 안에 빌드 시각이
+  # 박히고, base 이미지(eclipse-temurin:17-jdk, debian:bookworm-slim)가
+  # 떠다니는 태그라 며칠 사이에 내용이 바뀌기 때문이다. 그러면 dev 에서
+  # 검증한 바이너리와 prod 에 올라간 바이너리가 달라진다 —
+  # "dev 에서는 됐는데 prod 에서만 터진다" 의 원인이 된다.
+  #
+  # 그래서 빌드는 develop 에서 한 번만 하고, main 은 그 결과물에 태그만
+  # 추가로 붙인다(build once, promote). 새 이미지가 생기지 않으므로
+  # ECR 에는 한 digest 에 develop·main 태그가 함께 붙는다 — 그게 정상이다.
+  # ---------------------------------------------------------------
+  promote:
+    name: promote (develop → main)
+    needs: [verify]
+    if: github.event_name == 'push' && github.ref_name == 'main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    # put-image 도 OIDC 로 인증한다. publish 잡과 같은 이유로 id-token 이 필요하다.
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      # 머지 커밋의 2번째 부모 = 머지된 develop 쪽 커밋.
+      # 그 SHA 로 태그된 이미지가 ECR 에 있으므로 승격 대상을 추측이 아니라
+      # 특정할 수 있다. develop 태그를 그냥 쓰면 머지 이후 develop 이 앞서갔을 때
+      # 엉뚱한 이미지를 승격하게 된다.
+      #
+      # ⚠️ fetch-depth 기본값은 1 이라 부모를 읽지 못한다. 2 가 필요하다.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ap-northeast-2
+
+      # 필요 권한: ecr:BatchGetImage (매니페스트 읽기), ecr:PutImage (태그 붙이기).
+      # PutImage 는 docker push 에도 쓰이므로 이미 있을 것이고, BatchGetImage 가
+      # 빠져 있으면 여기서 AccessDeniedException 으로 즉시 드러난다.
+      - name: Retag develop image as main
+        env:
+          REPO: gamehouse-riot
+          MAIN_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          if SRC=$(git rev-parse --verify -q "HEAD^2"); then
+            echo "머지 커밋 감지 — 승격 대상 커밋: ${SRC}"
+            ID="imageTag=dev-${SRC}"
+          else
+            echo "::warning::dev-<sha> 태그를 특정하지 못했다 — 머지 커밋이 아니거나(스쿼시/fast-forward), 접두사 도입 이전에 빌드된 이미지다."
+            echo "::warning::develop 태그로 폴백한다."
+            ID="imageTag=develop"
+          fi
+
+          MANIFEST=$(aws ecr batch-get-image \
+            --repository-name "$REPO" \
+            --image-ids "$ID" \
+            --query 'images[0].imageManifest' --output text)
+
+          if [ -z "$MANIFEST" ] || [ "$MANIFEST" = "None" ]; then
+            echo "::error::ECR 에서 승격할 이미지를 찾지 못했다 (${ID})."
+            echo "::error::develop 빌드가 성공했는지, 그 커밋의 SHA 태그가 있는지 확인한다."
+            exit 1
+          fi
+
+          # 같은 매니페스트에 태그만 추가한다 — 이미지 본체는 새로 저장되지 않는다.
+          # 이미 그 태그가 같은 이미지에 붙어 있으면 ImageAlreadyExistsException 이
+          # 나는데, 원하는 상태와 같으므로 실패로 보지 않는다.
+          for TAG in main "main-$MAIN_SHA"; do
+            if aws ecr put-image --repository-name "$REPO" \
+                 --image-tag "$TAG" --image-manifest "$MANIFEST" >/dev/null 2>&1; then
+              echo "  태그 완료: ${REPO}:${TAG}"
+            else
+              echo "  ${REPO}:${TAG} — 이미 같은 이미지에 붙어 있다 (변경 없음)"
+            fi
+          done
