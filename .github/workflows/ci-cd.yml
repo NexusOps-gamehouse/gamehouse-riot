@@ -242,6 +242,34 @@ jobs:
           cache-from: type=gha,scope=riot
           cache-to: type=gha,mode=max,scope=riot
 
+      # infra 저장소에 "이 커밋 이미지가 준비됐다"고 알린다.
+      # 태그를 고치고 커밋하는 것은 infra 의 image-tag-writeback 워크플로가 한다.
+      #
+      # 보내는 값은 셋뿐이다. ECR 주소도 매니페스트 경로도 보내지 않는다 —
+      # 그건 infra 가 소유한다. sha 는 접두사 없는 40자리이고, 태그는 받는 쪽이
+      # <env>-<sha> 로 조립한다.
+      #
+      # 기본 GITHUB_TOKEN 은 이 레포 밖으로 나갈 수 없어 조직 secret 을 쓴다.
+      # gh api 는 2xx 가 아니면 종료 코드가 0이 아니라, 인증 실패(401)를
+      # 성공으로 넘기지 않는다.
+      #
+      # ⚠️ infra 의 수신 워크플로는 기본 브랜치(main)에서만 찾아진다.
+      #    거기 없으면 204 를 받고 아무 일도 일어나지 않는다.
+      - name: Notify infra (dev)
+        env:
+          GH_TOKEN: ${{ secrets.DISPATCH_TO_INFRA_TOKEN }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          gh api repos/NexusOps-gamehouse/infra/dispatches \
+            -f event_type=image-published \
+            -f "client_payload[service]=${SERVICE}" \
+            -f "client_payload[sha]=${SHA}" \
+            -f "client_payload[env]=dev"
+
+          echo "infra 에 알림: ${SERVICE} / dev-${SHA}"
+
   # ---------------------------------------------------------------
   # main 승격 — 다시 빌드하지 않는다.
   #
@@ -325,3 +353,23 @@ jobs:
               echo "  ${REPO}:${TAG} — 이미 같은 이미지에 붙어 있다 (변경 없음)"
             fi
           done
+
+      # 승격도 알린다. 여기를 빼면 dev 만 자동화되고 운영은 계속 손으로 태그를 적게 된다.
+      #
+      # 보내는 sha 는 main 의 커밋(github.sha)이다. 위에서 승격 대상을 찾을 때 쓴
+      # HEAD^2(머지된 develop 쪽 커밋)가 아니다 — ECR 에 붙는 태그가 main-$MAIN_SHA
+      # 이므로 매니페스트도 그것을 가리켜야 한다.
+      - name: Notify infra (main)
+        env:
+          GH_TOKEN: ${{ secrets.DISPATCH_TO_INFRA_TOKEN }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          gh api repos/NexusOps-gamehouse/infra/dispatches \
+            -f event_type=image-published \
+            -f "client_payload[service]=${SERVICE}" \
+            -f "client_payload[sha]=${SHA}" \
+            -f "client_payload[env]=main"
+
+          echo "infra 에 알림: ${SERVICE} / main-${SHA}"
