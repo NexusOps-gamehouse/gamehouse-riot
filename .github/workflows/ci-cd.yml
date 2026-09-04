@@ -242,6 +242,34 @@ jobs:
           cache-from: type=gha,scope=riot
           cache-to: type=gha,mode=max,scope=riot
 
+      # infra 저장소에 "이 커밋 이미지가 준비됐다"고 알린다.
+      # 태그를 고치고 커밋하는 것은 infra 의 image-tag-writeback 워크플로가 한다.
+      #
+      # 보내는 값은 셋뿐이다. ECR 주소도 매니페스트 경로도 보내지 않는다 —
+      # 그건 infra 가 소유한다. sha 는 접두사 없는 40자리이고, 태그는 받는 쪽이
+      # <env>-<sha> 로 조립한다.
+      #
+      # 기본 GITHUB_TOKEN 은 이 레포 밖으로 나갈 수 없어 조직 secret 을 쓴다.
+      # gh api 는 2xx 가 아니면 종료 코드가 0이 아니라, 인증 실패(401)를
+      # 성공으로 넘기지 않는다.
+      #
+      # ⚠️ infra 의 수신 워크플로는 기본 브랜치(main)에서만 찾아진다.
+      #    거기 없으면 204 를 받고 아무 일도 일어나지 않는다.
+      - name: Notify infra (dev)
+        env:
+          GH_TOKEN: ${{ secrets.DISPATCH_TO_INFRA_TOKEN }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          gh api repos/NexusOps-gamehouse/infra/dispatches \
+            -f event_type=image-published \
+            -f "client_payload[service]=${SERVICE}" \
+            -f "client_payload[sha]=${SHA}" \
+            -f "client_payload[env]=dev"
+
+          echo "infra 에 알림: ${SERVICE} / dev-${SHA}"
+
   # ---------------------------------------------------------------
   # main 승격 — 다시 빌드하지 않는다.
   #
@@ -314,14 +342,71 @@ jobs:
             exit 1
           fi
 
+          # 승격 대상의 digest. 아래에서 태그가 실제로 이것을 가리키는지 확인한다.
+          SRC_DIGEST=$(aws ecr batch-get-image \
+            --repository-name "$REPO" \
+            --image-ids "$ID" \
+            --query 'images[0].imageId.imageDigest' --output text)
+
           # 같은 매니페스트에 태그만 추가한다 — 이미지 본체는 새로 저장되지 않는다.
+          #
           # 이미 그 태그가 같은 이미지에 붙어 있으면 ImageAlreadyExistsException 이
-          # 나는데, 원하는 상태와 같으므로 실패로 보지 않는다.
+          # 나는데, 원하는 상태와 같으므로 실패로 보지 않는다. 다만 그 예외'만'
+          # 넘어간다 — 예전에는 에러를 버리고 모든 실패를 "이미 붙어 있다"로
+          # 처리해서, AccessDenied 나 레포 없음도 성공으로 끝났다.
+          #
+          # 2>&1 >/dev/null 순서가 중요하다. stderr 만 변수로 받고 stdout 은 버린다.
           for TAG in main "main-$MAIN_SHA"; do
-            if aws ecr put-image --repository-name "$REPO" \
-                 --image-tag "$TAG" --image-manifest "$MANIFEST" >/dev/null 2>&1; then
+            if err=$(aws ecr put-image --repository-name "$REPO" \
+                       --image-tag "$TAG" --image-manifest "$MANIFEST" 2>&1 >/dev/null); then
               echo "  태그 완료: ${REPO}:${TAG}"
-            else
+            elif printf '%s' "$err" | grep -q 'ImageAlreadyExistsException'; then
               echo "  ${REPO}:${TAG} — 이미 같은 이미지에 붙어 있다 (변경 없음)"
+            else
+              echo "::error::put-image 실패: ${REPO}:${TAG}"
+              echo "::error::${err}"
+              exit 1
             fi
           done
+
+          # 붙었다고 했으니 실제로 붙었는지 본다.
+          #
+          # 위 예외 이름 비교는 AWS 가 문구를 바꾸면 조용히 무너진다. 이쪽은
+          # 최종 상태를 보므로 그런 것과 무관하다.
+          #
+          # 존재 확인만으로는 부족하다. main 은 이동 태그라 이전 승격 때 붙은 것이
+          # 남아 있어서, put-image 가 실패해도 "있음"으로 통과해버린다.
+          # digest 까지 비교해야 지금 승격분을 가리키는지 알 수 있다.
+          for TAG in main "main-$MAIN_SHA"; do
+            GOT=$(aws ecr batch-get-image \
+              --repository-name "$REPO" \
+              --image-ids "imageTag=$TAG" \
+              --query 'images[0].imageId.imageDigest' --output text 2>/dev/null || true)
+
+            if [ "$GOT" != "$SRC_DIGEST" ]; then
+              echo "::error::${REPO}:${TAG} 가 승격 대상과 다르다"
+              echo "::error::기대 ${SRC_DIGEST} / 실제 ${GOT:-없음}"
+              exit 1
+            fi
+            echo "  확인: ${REPO}:${TAG} → ${SRC_DIGEST}"
+          done
+
+      # 승격도 알린다. 여기를 빼면 dev 만 자동화되고 운영은 계속 손으로 태그를 적게 된다.
+      #
+      # 보내는 sha 는 main 의 커밋(github.sha)이다. 위에서 승격 대상을 찾을 때 쓴
+      # HEAD^2(머지된 develop 쪽 커밋)가 아니다 — ECR 에 붙는 태그가 main-$MAIN_SHA
+      # 이므로 매니페스트도 그것을 가리켜야 한다.
+      - name: Notify infra (main)
+        env:
+          GH_TOKEN: ${{ secrets.DISPATCH_TO_INFRA_TOKEN }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          gh api repos/NexusOps-gamehouse/infra/dispatches \
+            -f event_type=image-published \
+            -f "client_payload[service]=${SERVICE}" \
+            -f "client_payload[sha]=${SHA}" \
+            -f "client_payload[env]=main"
+
+          echo "infra 에 알림: ${SERVICE} / main-${SHA}"
