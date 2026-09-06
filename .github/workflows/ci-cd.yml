@@ -210,6 +210,19 @@ jobs:
             "${{ github.actor }}" \
             "${{ secrets.GPR_TOKEN || secrets.GITHUB_TOKEN }}" > gradle.properties.ci
 
+      # 라벨은 이미지 config 에만 들어가고 레이어를 만들지 않는다. 커밋마다 값이
+      # 달라져 digest 가 갈리므로, ECR 콘솔에서 빌드마다 별도 행으로 보이고
+      # '생성 날짜' 컬럼 정렬이 동작한다. 레이어는 그대로 공유되어 추가 저장은 수 KB.
+      #
+      # ⚠️ digest 가 갈리면 수명 주기 정책이 세는 이미지 개수도 함께 늘어난다.
+      #    tagPrefixList 규칙과 유지 개수를 반드시 함께 조정할 것.
+      # ⚠️ main 은 promote(재빌드 없이 태그만 부착)라 라벨을 새로 붙이지 않는다.
+      #    따라서 dev-/main- 이 한 digest 에 뭉치는 build-once-promote 성질은
+      #    그대로 유지된다. 그게 정상이다.
+      - name: Build metadata
+        id: meta
+        run: echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
       - name: Build and push image
         uses: docker/build-push-action@v6
         with:
@@ -222,21 +235,28 @@ jobs:
           provenance: false
           sbom: false
 
+          # OCI 표준 라벨. docker inspect 로 "이 이미지 어느 커밋이야?" 를 바로 안다.
+          labels: |
+            org.opencontainers.image.created=${{ steps.meta.outputs.created }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ github.ref_name }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+
           secret-files: |
             gpr=gradle.properties.ci
 
-          # 브랜치 이름 = "그 브랜치의 지금 최신", SHA = "정확히 이 커밋" → 롤백 기준.
+          # 태그는 dev-<sha> 하나뿐이다. SHA = "정확히 이 커밋" 이라 롤백 기준이 된다.
+          # 서비스별 레포라 태그에 서비스명 접두사가 필요 없어졌다.
           #
-          # ⚠️ 브랜치를 하드코딩하지 말 것. :develop 으로 고정하면 main 에서 돈
-          #    이미지가 develop 태그를 덮어써 어느 브랜치 것인지 구분이 사라진다.
-          # SHA 태그에 dev- 접두사를 붙인다. 접두사가 없으면 콘솔 태그 목록에서
-          # 어느 SHA 가 develop 것이고 어느 게 main 승격분인지 구분되지 않는다.
-          # 접미사가 아니라 접두사인 이유: ECR 수명 주기 정책의 tagPrefixList 가
-          # 접두사 기준이라, 나중에 "dev- 태그는 N개만 유지" 같은 규칙을 걸기 쉽다.
-          # develop/main 브랜치 태그는 형식을 바꾸지 않는다 — k8s overlay 가
-          # newTag: develop 로 이 태그를 직접 참조한다.
+          # 접미사가 아니라 접두사(dev-)인 이유: ECR 수명 주기 정책의 tagPrefixList 가
+          # 접두사 기준이라 "dev- 태그는 N개만 유지" 규칙을 걸 수 있다.
+          #
+          # ⚠️ 움직이는 :develop 태그는 2026-09-06 에 없앴다. 새 이미지를 올려도 매니페스트
+          #    파일이 한 글자도 안 바뀌어 Argo CD 가 동기화할 것을 못 찾기 때문이다
+          #    (이름만 다를 뿐 :latest 와 같다). infra 의 overlays/dev 는 이미
+          #    newTag: dev-<sha> 를 쓰고, 그 값은 repository_dispatch 로 갱신된다.
+          #    되살리지 말 것.
           tags: |
-            ${{ steps.ecr.outputs.registry }}/gamehouse-riot:${{ github.ref_name }}
             ${{ steps.ecr.outputs.registry }}/gamehouse-riot:dev-${{ github.sha }}
 
           cache-from: type=gha,scope=riot
@@ -326,9 +346,17 @@ jobs:
             echo "머지 커밋 감지 — 승격 대상 커밋: ${SRC}"
             ID="imageTag=dev-${SRC}"
           else
-            echo "::warning::dev-<sha> 태그를 특정하지 못했다 — 머지 커밋이 아니거나(스쿼시/fast-forward), 접두사 도입 이전에 빌드된 이미지다."
-            echo "::warning::develop 태그로 폴백한다."
-            ID="imageTag=develop"
+            # 폴백하지 않는다. 예전에는 여기서 :develop 태그를 썼는데, 머지 이후
+            # develop 이 앞서갔다면 테스트하지 않은 이미지를 운영으로 승격하게 된다.
+            # 조용히 틀린 것을 올리느니 크게 실패하는 편이 낫다.
+            #
+            # 여기에 걸렸다면 원인은 둘 중 하나다:
+            #   - 스쿼시/리베이스 머지라 머지 커밋이 아니다 → 저장소 설정에서
+            #     "Allow squash merging" 을 끄고 머지 커밋 방식만 남긴다
+            #   - actions/checkout 의 fetch-depth 가 부족해 부모 객체가 없다
+            echo "::error::승격 대상 커밋(HEAD^2)을 찾지 못했다."
+            echo "::error::머지 커밋이 아니거나 fetch-depth 가 부족하다. 엉뚱한 이미지를 올리지 않기 위해 중단한다."
+            exit 1
           fi
 
           MANIFEST=$(aws ecr batch-get-image \
@@ -356,7 +384,7 @@ jobs:
           # 처리해서, AccessDenied 나 레포 없음도 성공으로 끝났다.
           #
           # 2>&1 >/dev/null 순서가 중요하다. stderr 만 변수로 받고 stdout 은 버린다.
-          for TAG in main "main-$MAIN_SHA"; do
+          for TAG in "main-$MAIN_SHA"; do
             if err=$(aws ecr put-image --repository-name "$REPO" \
                        --image-tag "$TAG" --image-manifest "$MANIFEST" 2>&1 >/dev/null); then
               echo "  태그 완료: ${REPO}:${TAG}"
@@ -374,10 +402,10 @@ jobs:
           # 위 예외 이름 비교는 AWS 가 문구를 바꾸면 조용히 무너진다. 이쪽은
           # 최종 상태를 보므로 그런 것과 무관하다.
           #
-          # 존재 확인만으로는 부족하다. main 은 이동 태그라 이전 승격 때 붙은 것이
-          # 남아 있어서, put-image 가 실패해도 "있음"으로 통과해버린다.
+          # 존재 확인만으로는 부족하다. 재실행 등으로 같은 이름의 태그가 이미
+          # 있으면 put-image 가 실패해도 "있음"으로 통과해버린다.
           # digest 까지 비교해야 지금 승격분을 가리키는지 알 수 있다.
-          for TAG in main "main-$MAIN_SHA"; do
+          for TAG in "main-$MAIN_SHA"; do
             GOT=$(aws ecr batch-get-image \
               --repository-name "$REPO" \
               --image-ids "imageTag=$TAG" \
